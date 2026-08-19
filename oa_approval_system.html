@@ -27,8 +27,8 @@ input,textarea,select{-webkit-appearance:none;appearance:none}
 
 <script>
 // ============================================================
-// 版本 v3 - 修复无限加载 & 增强稳定性
-// 使用前请确保 Token 具有 repo 完整权限
+// 版本 v4 - 完整修复版本
+// 修复：无限加载、标签过滤失效、图片上传超限
 // ============================================================
 const $=id=>document.getElementById(id);
 const LS={get:k=>localStorage.getItem(k)||'',set:(k,v)=>localStorage.setItem(k,v)};
@@ -46,19 +46,25 @@ function today(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth
 function now(){const d=new Date();return today()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
 function toast(msg){const t=document.createElement('div');t.className='toast';t.textContent=msg;document.body.appendChild(t);setTimeout(()=>t.remove(),2500);}
 
-async function compressImage(file,maxW=800,quality=0.7){
+// =============== 增强图片压缩 ===============
+async function compressImage(file, maxW=600, quality=0.5){
   return new Promise((resolve,reject)=>{
     const reader=new FileReader();
     reader.onload=e=>{
       const img=new Image();
       img.onload=()=>{
         const canvas=document.createElement('canvas');
-        const w=img.width>maxW?maxW:img.width;
-        const h=Math.round(img.height*(w/img.width));
-        canvas.width=w;canvas.height=h;
+        let w=img.width, h=img.height;
+        if(w>maxW){ h=Math.round(h*(maxW/w)); w=maxW; }
+        canvas.width=w; canvas.height=h;
         const ctx=canvas.getContext('2d');
         ctx.drawImage(img,0,0,w,h);
-        resolve(canvas.toDataURL('image/jpeg',quality));
+        let dataUrl=canvas.toDataURL('image/jpeg', quality);
+        // 如果数据仍大于50KB，再次压缩
+        if(dataUrl.length > 50000){
+          dataUrl=canvas.toDataURL('image/jpeg', 0.3);
+        }
+        resolve(dataUrl);
       };
       img.onerror=reject;
       img.src=e.target.result;
@@ -67,16 +73,17 @@ async function compressImage(file,maxW=800,quality=0.7){
     reader.readAsDataURL(file);
   });
 }
+
 function renderImgPreview(container,images,onDelete){
   container.innerHTML=images.map((src,idx)=>`<div class="relative w-20 h-20 rounded-xl overflow-hidden border border-gray-200 group"><img src="${src}" class="w-full h-full object-cover"><button type="button" data-idx="${idx}" class="del-img absolute top-0.5 right-0.5 w-5 h-5 bg-black/60 text-white rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition">×</button></div>`).join('');
   container.querySelectorAll('.del-img').forEach(btn=>btn.onclick=e=>{e.stopPropagation();onDelete(parseInt(btn.dataset.idx));});
 }
 
-
+// =============== API 封装（超时延长至 15s） ===============
 async function ghApi(path,method='GET',body=null){
   const url=`https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}${path}`;
   const ctrl=new AbortController();
-  const t=setTimeout(()=>ctrl.abort(),8000);
+  const t=setTimeout(()=>ctrl.abort(),15000);  // 延长超时
   const opts={method,headers:{'Authorization':`token ${CONFIG.token}`,'Accept':'application/vnd.github.v3+json','Content-Type':'application/json'},signal:ctrl.signal};
   if(body)opts.body=JSON.stringify(body);
   let res;
@@ -90,7 +97,12 @@ async function ghApi(path,method='GET',body=null){
 }
 
 function parseIssue(issue){
-  try{const data=JSON.parse(issue.body);if(data.type==='oa-approval')return{...data,images:data.images||[],number:issue.number,labels:issue.labels.map(l=>l.name),state:issue.state,created_at:issue.created_at};}catch(e){}
+  try{
+    const data=JSON.parse(issue.body);
+    if(data.type && data.type.trim()==='oa-approval'){
+      return {...data, images:data.images||[], number:issue.number, labels:issue.labels.map(l=>l.name), state:issue.state, created_at:issue.created_at};
+    }
+  }catch(e){}
   return null;
 }
 
@@ -105,7 +117,12 @@ function parseComment(comment){
   return{type:'other',body:text,created_at:comment.created_at};
 }
 
-function getStatus(issue){if(issue.labels.includes('approved'))return'approved';if(issue.labels.includes('rejected'))return'rejected';if(issue.labels.includes('pending'))return'pending';return'collecting';}
+function getStatus(issue){
+  if(issue.labels.includes('approved')) return 'approved';
+  if(issue.labels.includes('rejected')) return 'rejected';
+  if(issue.labels.includes('pending')) return 'pending';
+  return 'collecting';
+}
 function statusText(s){return s==='collecting'?'🔍收集中':s==='pending'?'⏳待审批':s==='approved'?'✅已批准':'❌已拒绝';}
 function statusClass(s){return s==='collecting'?'b-collect':s==='pending'?'b-pending':s==='approved'?'b-approve':'b-reject';}
 
@@ -131,15 +148,16 @@ class SigPad{
   save(){return this.c.toDataURL('image/png')}
 }
 
+// =============== 主应用 ===============
 const App={
-  page:'home',issues:[],current:null,comments:[],loading:false,filter:'all',
-  _initialLoadDone: false,   // 防止重复加载
+  page:'home', issues:[], current:null, comments:[], loading:false, filter:'all',
+  _initialLoadDone: false,
 
   init(){
     this.parse();
     this.render();
-    window.addEventListener('hashchange',()=>{this.parse();this.render();});
-    // 如果5秒后仍加载中，强制重置（应急）
+    window.addEventListener('hashchange', ()=>{ this.parse(); this.render(); });
+    // 8秒应急重置
     setTimeout(()=>{
       if(this.loading){
         this.loading = false;
@@ -148,9 +166,20 @@ const App={
       }
     }, 8000);
   },
-  parse(){const h=location.hash.slice(1);if(!h){this.page='home';this.currentId=null;return}const p=new URLSearchParams(h);this.page=p.get('page')||'home';this.currentId=p.get('id')?parseInt(p.get('id')):null;},
-  go(page,id){let url='#page='+page;if(id)url+='&id='+id;location.hash=url;},
+  parse(){
+    const h=location.hash.slice(1);
+    if(!h){ this.page='home'; this.currentId=null; return; }
+    const p=new URLSearchParams(h);
+    this.page=p.get('page')||'home';
+    this.currentId=p.get('id')?parseInt(p.get('id')):null;
+  },
+  go(page,id){
+    let url='#page='+page;
+    if(id) url+='&id='+id;
+    location.hash=url;
+  },
 
+  // ========== 加载列表（去掉 labels 过滤） ==========
   async loadList(force=false){
     if(this.loading && !force) return;
     this.loading = true;
@@ -158,7 +187,7 @@ const App={
     try{
       const data = await ghApi('/issues?state=all&sort=created&direction=desc&per_page=50');
       this.issues = data.map(parseIssue).filter(Boolean);
-    } catch(e){
+    }catch(e){
       toast('加载失败：'+e.message);
       this.issues = [];
     }
@@ -168,28 +197,37 @@ const App={
   },
 
   async loadDetail(force=false){
-    if(!this.currentId)return;
-    if(this.loading&&!force)return;
-    this.loading=true;this.render();
+    if(!this.currentId) return;
+    if(this.loading && !force) return;
+    this.loading=true; this.render();
     try{
-      const [issue,comments]=await Promise.all([ghApi(`/issues/${this.currentId}`),ghApi(`/issues/${this.currentId}/comments`)]);
-      this.current=parseIssue(issue);this.comments=comments.map(parseComment);
-    }catch(e){toast('加载详情失败：'+e.message);this.current=null;this.comments=[];}
-    this.loading=false;this.render();
+      const [issue, comments] = await Promise.all([
+        ghApi(`/issues/${this.currentId}`),
+        ghApi(`/issues/${this.currentId}/comments`)
+      ]);
+      this.current = parseIssue(issue);
+      this.comments = comments.map(parseComment);
+    }catch(e){
+      toast('加载详情失败：'+e.message);
+      this.current=null; this.comments=[];
+    }
+    this.loading=false; this.render();
   },
 
   render(){
-    const a=$('app');a.innerHTML='';a.className='max-w-lg mx-auto min-h-screen fade';
-    if(!CONFIG.token&&this.page!=='settings'){this.page='settings';}
+    const a=$('app');
+    a.innerHTML='';
+    a.className='max-w-lg mx-auto min-h-screen fade';
+    if(!CONFIG.token && this.page!=='settings'){ this.page='settings'; }
     switch(this.page){
       case'home':
         this.rHome(a);
         if(!this.loading && !this._initialLoadDone) this.loadList();
         break;
-      case'apply':this.rApply(a);break;
-      case'detail':this.rDetail(a);if(!this.current||this.current.number!==this.currentId)this.loadDetail();break;
-      case'settings':this.rSettings(a);break;
-      default:this.rHome(a);
+      case'apply': this.rApply(a); break;
+      case'detail': this.rDetail(a); if(!this.current||this.current.number!==this.currentId) this.loadDetail(); break;
+      case'settings': this.rSettings(a); break;
+      default: this.rHome(a);
     }
   },
 
@@ -463,7 +501,6 @@ const App={
     CONFIG.token=$('tk').value.trim();
     CONFIG.password=$('pw2').value.trim();
     toast('保存成功！');
-    // 重置加载状态，重新加载首页
     this._initialLoadDone = false;
     this.loading = false;
     this.issues = [];
@@ -506,7 +543,6 @@ const App={
   }
 };
 
-// 启动应用
 App.init();
 </script>
 </body>
