@@ -18,6 +18,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica N
 input,textarea,select{-webkit-appearance:none;appearance:none}
 .loading{display:inline-block;width:20px;height:20px;border:3px solid #e5e7eb;border-top-color:#3b82f6;border-radius:50%;animation:spin 1s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg)}}
+.toast{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#1f2937;color:#fff;padding:10px 20px;border-radius:12px;font-size:14px;z-index:9999;animation:fadeIn .2s ease-out;}
 </style>
 <base target="_blank">
 </head>
@@ -39,6 +40,7 @@ const CONFIG={
 
 function today(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
 function now(){const d=new Date();return today()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
+function toast(msg){const t=document.createElement('div');t.className='toast';t.textContent=msg;document.body.appendChild(t);setTimeout(()=>t.remove(),2500);}
 
 async function ghApi(path,method='GET',body=null){
   const url=`https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}${path}`;
@@ -70,8 +72,8 @@ function statusText(s){return s==='collecting'?'🔍收集中':s==='pending'?'�
 function statusClass(s){return s==='collecting'?'b-collect':s==='pending'?'b-pending':s==='approved'?'b-approve':'b-reject';}
 
 class SigPad{
-  constructor(cid,onDone){
-    this.c=$(cid);this.x=this.c.getContext('2d');this.d=false;this.h=false;this.onDone=onDone;
+  constructor(cid){
+    this.c=$(cid);this.x=this.c.getContext('2d');this.d=false;this.h=false;
     const r=this.c.parentElement.getBoundingClientRect();
     this.c.width=r.width*2;this.c.height=400;this.c.style.width=r.width+'px';this.c.style.height='200px';
     this.x.scale(2,2);this.x.lineCap='round';this.x.lineJoin='round';this.x.lineWidth=2.5;this.x.strokeStyle='#1f2937';
@@ -92,30 +94,32 @@ class SigPad{
 }
 
 const App={
-  page:'home',issues:[],current:null,comments:[],loading:false,
+  page:'home',issues:[],current:null,comments:[],loading:false,filter:'all',
   init(){
     this.parse();this.render();
-    window.addEventListener('hashchange',()=>{this.parse();this.render()});
+    window.addEventListener('hashchange',()=>{this.parse();this.render();});
   },
-  parse(){const h=location.hash.slice(1);if(!h){this.page='home';return}const p=new URLSearchParams(h);this.page=p.get('page')||'home';this.currentId=p.get('id')?parseInt(p.get('id')):null;},
+  parse(){const h=location.hash.slice(1);if(!h){this.page='home';this.currentId=null;return}const p=new URLSearchParams(h);this.page=p.get('page')||'home';this.currentId=p.get('id')?parseInt(p.get('id')):null;},
   go(page,id){let url='#page='+page;if(id)url+='&id='+id;location.hash=url;},
 
-  async loadList(){
+  async loadList(force=false){
+    if(this.loading&&!force)return;
     this.loading=true;this.render();
     try{
       const data=await ghApi('/issues?state=all&labels=collecting,pending,approved,rejected&sort=created&direction=desc&per_page=50');
       this.issues=data.map(parseIssue).filter(Boolean);
-    }catch(e){alert('加载失败：'+e.message);}
+    }catch(e){toast('加载失败：'+e.message);}
     this.loading=false;this.render();
   },
 
-  async loadDetail(){
+  async loadDetail(force=false){
     if(!this.currentId)return;
+    if(this.loading&&!force)return;
     this.loading=true;this.render();
     try{
       const [issue,comments]=await Promise.all([ghApi(`/issues/${this.currentId}`),ghApi(`/issues/${this.currentId}/comments`)]);
       this.current=parseIssue(issue);this.comments=comments.map(parseComment);
-    }catch(e){alert('加载详情失败：'+e.message);}
+    }catch(e){toast('加载详情失败：'+e.message);}
     this.loading=false;this.render();
   },
 
@@ -123,37 +127,46 @@ const App={
     const a=$('app');a.innerHTML='';a.className='max-w-lg mx-auto min-h-screen fade';
     if(!CONFIG.token&&this.page!=='settings'){this.page='settings';}
     switch(this.page){
-      case'home':this.rHome(a);break;case'apply':this.rApply(a);break;
-      case'detail':this.rDetail(a);break;case'settings':this.rSettings(a);break;
+      case'home':this.rHome(a);if(!this.loading&&this.issues.length===0)this.loadList();break;
+      case'apply':this.rApply(a);break;
+      case'detail':this.rDetail(a);if(!this.current||this.current.number!==this.currentId)this.loadDetail();break;
+      case'settings':this.rSettings(a);break;
       default:this.rHome(a);
     }
   },
 
   rHome(c){
-    if(this.loading){c.innerHTML='<div class="flex items-center justify-center h-screen"><div class="loading"></div></div>';return;}
+    if(this.loading){c.innerHTML='<div class="flex items-center justify-center h-screen flex-col gap-3"><div class="loading"></div><div class="text-sm text-gray-500">加载申请列表...</div></div>';return;}
+    const filtered=this.issues.filter(i=>!this.filter||this.filter==='all'||getStatus(i)===this.filter);
     c.innerHTML=`<div class="px-4 pt-6 pb-8">
-      <div class="flex items-center justify-between mb-6">
+      <div class="flex items-center justify-between mb-5">
         <div><h1 class="text-xl font-bold text-gray-900">OA 审批系统</h1><p class="text-xs text-gray-500 mt-1">实时同步 · 公开透明</p></div>
         <div class="flex gap-2">
-          <button onclick="App.go('settings')" class="p-2 rounded-xl bg-white shadow-sm border border-gray-200 text-gray-600"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg></button>
-          <button onclick="App.go('apply')" class="px-4 py-2 btn-p text-white rounded-xl font-medium shadow-lg shadow-blue-200 text-sm flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>发起申请</button>
+          <button onclick="App.loadList(true)" class="p-2 rounded-xl bg-white shadow-sm border border-gray-200 text-gray-600" title="刷新"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg></button>
+          <button onclick="App.go('settings')" class="p-2 rounded-xl bg-white shadow-sm border border-gray-200 text-gray-600" title="设置"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg></button>
+          <button onclick="App.go('apply')" class="px-3 py-2 btn-p text-white rounded-xl font-medium shadow-lg shadow-blue-200 text-sm flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>发起</button>
         </div>
       </div>
 
       <div class="flex gap-2 mb-4 overflow-x-auto pb-1">
-        <button onclick="App.filter='all';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium ${App.filter==='all'?'bg-gray-900 text-white':'bg-white text-gray-600 border border-gray-200'}">全部</button>
-        <button onclick="App.filter='collecting';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium ${App.filter==='collecting'?'bg-blue-500 text-white':'bg-white text-gray-600 border border-gray-200'}">收集中</button>
-        <button onclick="App.filter='pending';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium ${App.filter==='pending'?'bg-yellow-500 text-white':'bg-white text-gray-600 border border-gray-200'}">待审批</button>
-        <button onclick="App.filter='approved';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium ${App.filter==='approved'?'bg-green-500 text-white':'bg-white text-gray-600 border border-gray-200'}">已批准</button>
-        <button onclick="App.filter='rejected';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium ${App.filter==='rejected'?'bg-red-500 text-white':'bg-white text-gray-600 border border-gray-200'}">已拒绝</button>
+        <button onclick="App.filter='all';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap ${App.filter==='all'?'bg-gray-900 text-white':'bg-white text-gray-600 border border-gray-200'}">全部 ${this.issues.length}</button>
+        <button onclick="App.filter='collecting';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap ${App.filter==='collecting'?'bg-blue-500 text-white':'bg-white text-gray-600 border border-gray-200'}">收集中 ${this.issues.filter(i=>getStatus(i)==='collecting').length}</button>
+        <button onclick="App.filter='pending';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap ${App.filter==='pending'?'bg-yellow-500 text-white':'bg-white text-gray-600 border border-gray-200'}">待审批 ${this.issues.filter(i=>getStatus(i)==='pending').length}</button>
+        <button onclick="App.filter='approved';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap ${App.filter==='approved'?'bg-green-500 text-white':'bg-white text-gray-600 border border-gray-200'}">已批准 ${this.issues.filter(i=>getStatus(i)==='approved').length}</button>
+        <button onclick="App.filter='rejected';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap ${App.filter==='rejected'?'bg-red-500 text-white':'bg-white text-gray-600 border border-gray-200'}">已拒绝 ${this.issues.filter(i=>getStatus(i)==='rejected').length}</button>
       </div>
 
-      ${this.issues.length===0?'<div class="text-center py-20 text-gray-400"><div class="text-4xl mb-3">📋</div><div class="text-sm">暂无申请记录</div><div class="text-xs mt-1">点击右上角发起第一个申请</div></div>':
-      this.issues.filter(i=>!this.filter||this.filter==='all'||getStatus(i)===this.filter).map(i=>{
-        const s=getStatus(i);const reviews=this.comments?this.comments.filter(c=>c.type==='review').length:0;
+      ${filtered.length===0?`<div class="text-center py-16 text-gray-400">
+        <div class="text-4xl mb-3">📋</div>
+        <div class="text-sm">${this.issues.length===0?'暂无申请记录':'该分类下暂无记录'}</div>
+        <div class="text-xs mt-2">${this.issues.length===0?'点击右上角发起第一个申请':''}</div>
+        ${this.issues.length===0?'<button onclick="App.go('apply')" class="mt-4 px-4 py-2 btn-p text-white rounded-xl text-sm">发起申请</button>':''}
+      </div>`:
+      filtered.map(i=>{
+        const s=getStatus(i);
         return `<div onclick="App.go('detail',${i.number})" class="card p-4 mb-3 cursor-pointer active:scale-[0.98] transition-transform">
           <div class="flex items-start justify-between mb-2">
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2 flex-wrap">
               <span class="badge ${statusClass(s)}">${statusText(s)}</span>
               <span class="text-xs text-gray-400">${i.date}</span>
             </div>
@@ -163,7 +176,7 @@ const App={
           <p class="text-sm text-gray-600 line-clamp-2 mb-2">${i.reason}</p>
           <div class="flex items-center justify-between text-xs text-gray-500">
             <span>申请人：${i.applicant}</span>
-            ${s==='collecting'?'<span class="text-blue-500">💬 去评价 →</span>':s==='pending'?'<span class="text-yellow-600">👑 等待审批</span>':'<span class="text-gray-400">已完结</span>'}
+            ${s==='collecting'?'<span class="text-blue-500 font-medium">💬 去评价 →</span>':s==='pending'?'<span class="text-yellow-600 font-medium">👑 等待审批</span>':'<span class="text-gray-400">已完结</span>'}
           </div>
         </div>`;
       }).join('')}
@@ -201,24 +214,26 @@ const App={
           body:JSON.stringify({type:'oa-approval',date:$('date').value,applicant:$('applicant').value.trim(),item:$('item').value.trim(),reason:$('reason').value.trim(),price:parseFloat($('price').value),createdAt:now()}),
           labels:['collecting']
         });
-        alert('申请提交成功！');App.go('home');
-      }catch(err){alert('提交失败：'+err.message);btn.disabled=false;btn.innerText='提交申请';}
+        toast('申请提交成功！');
+        await App.loadList(true);
+        App.go('home');
+      }catch(err){toast('提交失败：'+err.message);btn.disabled=false;btn.innerText='提交申请';}
     });
   },
 
   rDetail(c){
-    if(this.loading){c.innerHTML='<div class="flex items-center justify-center h-screen"><div class="loading"></div></div>';return;}
-    if(!this.current){c.innerHTML='<div class="text-center py-20 text-gray-400">加载中...</div>';this.loadDetail();return;}
+    if(this.loading){c.innerHTML='<div class="flex items-center justify-center h-screen flex-col gap-3"><div class="loading"></div><div class="text-sm text-gray-500">加载详情...</div></div>';return;}
+    if(!this.current){c.innerHTML='<div class="flex items-center justify-center h-screen flex-col gap-3"><div class="loading"></div><div class="text-sm text-gray-500">加载详情...</div></div>';return;}
     const d=this.current,s=getStatus(d);
     const reviews=this.comments.filter(x=>x.type==='review');
     const approval=this.comments.find(x=>x.type==='approval');
     const canSubmitToApprove=reviews.length>=1&&s==='collecting';
 
     c.innerHTML=`<div class="px-4 pt-6 pb-8">
-      <div class="flex items-center gap-3 mb-6">
+      <div class="flex items-center gap-3 mb-5">
         <button onclick="App.go('home')" class="p-2 rounded-full hover:bg-gray-200 transition bg-white shadow-sm"><svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button>
         <h2 class="text-lg font-bold text-gray-900">申请详情</h2>
-        <button onclick="App.loadDetail()" class="ml-auto p-2 rounded-full hover:bg-gray-200 transition bg-white shadow-sm text-gray-600 text-xs">🔄 刷新</button>
+        <button onclick="App.loadDetail(true)" class="ml-auto p-2 rounded-full hover:bg-gray-200 transition bg-white shadow-sm text-gray-600 text-xs flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>刷新</button>
       </div>
 
       <div class="card p-5 mb-4">
@@ -287,42 +302,42 @@ const App={
     </div>`;
 
     if(s==='collecting'){
-      const p=new SigPad('sc');$('cs').onclick=()=>p.clear();$('ss').onclick=()=>{if(!p.h){alert('请先签名');return}$('sd').value=p.save();$('sp').classList.remove('hidden');};
+      const p=new SigPad('sc');$('cs').onclick=()=>p.clear();$('ss').onclick=()=>{if(!p.h){toast('请先签名');return}$('sd').value=p.save();$('sp').classList.remove('hidden');};
       $('rf').addEventListener('submit',async e=>{
         e.preventDefault();const rv=$('rname').value.trim(),op=$('rop').value.trim(),alt=$('ralt').value.trim(),sig=$('sd').value;
-        if(!sig){alert('请先签名');return}if(rv===d.applicant){alert('自己不能给自己评价！');return}
+        if(!sig){toast('请先签名');return}if(rv===d.applicant){toast('自己不能给自己评价！');return}
         if(reviews.some(r=>r.reviewer===rv)){if(!confirm('你已评价过，确定覆盖？'))return;}
         try{
           await ghApi(`/issues/${d.number}/comments`,'POST',{body:`<!--OA-REVIEW:${JSON.stringify({reviewer:rv,opinion:op,alternative:alt})}-->\n\n**评价人**：${rv}\n**意见**：${op}\n${alt?'**平替**：'+alt+'\n':''}\n<img src="${sig}" width="180">`});
-          alert('评价成功！');App.loadDetail();
-        }catch(err){alert('失败：'+err.message);}
+          toast('评价成功！');await App.loadDetail(true);
+        }catch(err){toast('失败：'+err.message);}
       });
     }
 
     if(s==='pending'&&!approval){
-      const pa=new SigPad('sac');$('csa').onclick=()=>pa.clear();$('ssa').onclick=()=>{if(!pa.h){alert('请先签名');return}$('sad').value=pa.save();$('sap').classList.remove('hidden');};
+      const pa=new SigPad('sac');$('csa').onclick=()=>pa.clear();$('ssa').onclick=()=>{if(!pa.h){toast('请先签名');return}$('sad').value=pa.save();$('sap').classList.remove('hidden');};
       $('af2').addEventListener('submit',async e=>{
         e.preventDefault();const dec=document.querySelector('input[name="dec"]:checked'),cm=$('ac').value.trim(),sig=$('sad').value;
-        if(!dec){alert('请选择批准或拒绝');return}if(!sig){alert('请先签名');return}
+        if(!dec){toast('请选择批准或拒绝');return}if(!sig){toast('请先签名');return}
         try{
           await ghApi(`/issues/${d.number}/comments`,'POST',{body:`<!--OA-APPROVAL:${JSON.stringify({approver:'王睿玥',status:dec.value,comment:cm})}-->\n\n**审批人**：王睿玥\n**结果**：${dec.value==='approved'?'✅ 批准':'❌ 拒绝'}\n**意见**：${cm}\n\n<img src="${sig}" width="180">`});
           await ghApi(`/issues/${d.number}/labels`,'PUT',{labels:[dec.value]});
           await ghApi(`/issues/${d.number}`,'PATCH',{state:'closed'});
-          alert(`已${dec.value==='approved'?'批准':'拒绝'}！`);App.loadDetail();
-        }catch(err){alert('审批失败：'+err.message);}
+          toast(`已${dec.value==='approved'?'批准':'拒绝'}！`);await App.loadDetail(true);
+        }catch(err){toast('审批失败：'+err.message);}
       });
     }
   },
 
   checkPassword(){
     if($('pw').value===CONFIG.password){$('pwBox').classList.add('hidden');$('af2').classList.remove('hidden');}
-    else{alert('密码错误');}
+    else{toast('密码错误');}
   },
 
   async submitToApprove(number){
     if(!confirm('确定提交给王睿玥审批吗？提交后不能再评价。'))return;
-    try{await ghApi(`/issues/${number}/labels`,'PUT',{labels:['pending']});alert('已提交审批！');App.loadDetail();}
-    catch(err){alert('失败：'+err.message);}
+    try{await ghApi(`/issues/${number}/labels`,'PUT',{labels:['pending']});toast('已提交审批！');await App.loadDetail(true);}
+    catch(err){toast('失败：'+err.message);}
   },
 
   rSettings(c){
@@ -334,7 +349,7 @@ const App={
       <div class="card p-5 space-y-4">
         <div><label class="block text-sm font-medium text-gray-700 mb-1.5">GitHub Token <span class="text-red-500">*</span></label>
         <input type="password" id="tk" value="${CONFIG.token}" placeholder="ghp_xxxxxxxx" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 text-sm">
-        <p class="text-xs text-gray-500 mt-1">用于读写 GitHub Issues，不会上传到任何服务器</p></div>
+        <p class="text-xs text-gray-500 mt-1">用于读写 GitHub Issues，只存在你的浏览器里</p></div>
         <div><label class="block text-sm font-medium text-gray-700 mb-1.5">审批密码</label>
         <input type="text" id="pw2" value="${CONFIG.password}" placeholder="王睿玥的审批密码" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 text-sm"></div>
         <button onclick="App.saveSettings()" class="w-full py-3 btn-p text-white rounded-xl font-medium shadow-lg active:scale-95 transition-transform text-sm">保存设置</button>
@@ -349,17 +364,16 @@ const App={
     </div>`;
   },
 
-  saveSettings(){CONFIG.token=$('tk').value.trim();CONFIG.password=$('pw2').value.trim();alert('保存成功！');App.go('home');},
+  saveSettings(){CONFIG.token=$('tk').value.trim();CONFIG.password=$('pw2').value.trim();toast('保存成功！');App.loadList(true);App.go('home');},
 
   async initLabels(){
     const labels=[{name:'collecting',color:'3b82f6',description:'评价收集中'},{name:'pending',color:'f59e0b',description:'等待最终审批'},{name:'approved',color:'10b981',description:'已批准'},{name:'rejected',color:'ef4444',description:'已拒绝'}];
-    let ok=0;for(const lb of labels){try{await ghApi('/labels','POST',lb);ok++;}catch(e){}}
-    alert(`初始化完成！新建 ${ok} 个标签，已存在则跳过。`);
+    let ok=0;for(const lb of labels){try{await ghApi('/labels','POST',lb);ok++;}catch(e){if(e.message&&e.message.includes('already_exists'))ok++;}}
+    toast(`初始化完成！${ok}/4 个标签就绪`);
   }
 };
 
 App.init();
-if(App.page==='home')App.loadList();
 </script>
 </body>
 </html>
