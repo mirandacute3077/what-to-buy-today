@@ -137,18 +137,20 @@ const App={
   go(page,id){let url='#page='+page;if(id)url+='&id='+id;location.hash=url;},
 
   async loadList(force=false){
-    if(this.loading&&!force)return;
-    this.loading=true;this.render();
-    try{
-      const data=await ghApi('/issues?state=all&labels=collecting,pending,approved,rejected&sort=created&direction=desc&per_page=50');
-      this.issues=data.map(parseIssue).filter(Boolean);
-    }catch(e){
-      toast('加载失败：'+e.message);
-      this.issues=[];
-    }
-    this.loading=false;this.render();
-  },
-
+  if(this.loading && !force) return;
+  this.loading = true;
+  this.render();
+  try{
+    const data = await ghApi('/issues?state=all&labels=collecting,pending,approved,rejected&sort=created&direction=desc&per_page=50');
+    this.issues = data.map(parseIssue).filter(Boolean);
+  } catch(e){
+    toast('加载失败：'+e.message);
+    this.issues = [];
+  }
+  this.loading = false;
+  this._initialLoadDone = true;
+  this.render();
+}
   async loadDetail(force=false){
     if(!this.currentId)return;
     if(this.loading&&!force)return;
@@ -164,7 +166,10 @@ const App={
     const a=$('app');a.innerHTML='';a.className='max-w-lg mx-auto min-h-screen fade';
     if(!CONFIG.token&&this.page!=='settings'){this.page='settings';}
     switch(this.page){
-      case'home':this.rHome(a);if(!this.loading&&this.issues.length===0)this.loadList();break;
+      case'home':
+    this.rHome(a);
+    if(!this.loading && !this._initialLoadDone) this.loadList();
+    break;
       case'apply':this.rApply(a);break;
       case'detail':this.rDetail(a);if(!this.current||this.current.number!==this.currentId)this.loadDetail();break;
       case'settings':this.rSettings(a);break;
