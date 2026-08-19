@@ -21,6 +21,7 @@ input,textarea,select{-webkit-appearance:none;appearance:none}
 .toast{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#1f2937;color:#fff;padding:10px 20px;border-radius:12px;font-size:14px;z-index:9999;animation:fadeIn .2s ease-out;}
 </style>
 <base target="_blank">
+<base target="_blank">
 </head>
 <body class="min-h-screen">
 <div id="app" class="max-w-lg mx-auto min-h-screen fade"></div>
@@ -71,10 +72,17 @@ function renderImgPreview(container,images,onDelete){
 
 async function ghApi(path,method='GET',body=null){
   const url=`https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}${path}`;
-  const opts={method,headers:{'Authorization':`token ${CONFIG.token}`,'Accept':'application/vnd.github.v3+json','Content-Type':'application/json'}};
+  const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(),8000);
+  const opts={method,headers:{'Authorization':`token ${CONFIG.token}`,'Accept':'application/vnd.github.v3+json','Content-Type':'application/json'},signal:ctrl.signal};
   if(body)opts.body=JSON.stringify(body);
-  const res=await fetch(url,opts);
-  if(!res.ok){const err=await res.json().catch(()=>({}));throw new Error(err.message||`HTTP ${res.status}`);}
+  let res;
+  try{res=await fetch(url,opts);}catch(e){clearTimeout(t);if(e.name==='AbortError')throw new Error('请求超时，请检查网络');throw e;}
+  clearTimeout(t);
+  if(!res.ok){
+    if(res.status===401){LS.set('gh_token','');CONFIG.token='';toast('Token 已失效，请重新配置');App.go('settings');throw new Error('Token 失效');}
+    const err=await res.json().catch(()=>({}));throw new Error(err.message||`HTTP ${res.status}`);
+  }
   return res.status===204?null:res.json();
 }
 
@@ -135,7 +143,7 @@ const App={
     try{
       const data=await ghApi('/issues?state=all&labels=collecting,pending,approved,rejected&sort=created&direction=desc&per_page=50');
       this.issues=data.map(parseIssue).filter(Boolean);
-    }catch(e){toast('加载失败：'+e.message);}
+    }catch(e){toast('加载失败：'+e.message);this.issues=[];}
     this.loading=false;this.render();
   },
 
@@ -146,7 +154,7 @@ const App={
     try{
       const [issue,comments]=await Promise.all([ghApi(`/issues/${this.currentId}`),ghApi(`/issues/${this.currentId}/comments`)]);
       this.current=parseIssue(issue);this.comments=comments.map(parseComment);
-    }catch(e){toast('加载详情失败：'+e.message);}
+    }catch(e){toast('加载详情失败：'+e.message);this.current=null;this.comments=[];}
     this.loading=false;this.render();
   },
 
