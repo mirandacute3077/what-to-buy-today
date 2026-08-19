@@ -156,7 +156,7 @@ const App={
     this.loading = true;
     this.render();
     try{
-      const data = await ghApi('/issues?state=all&labels=collecting,pending,approved,rejected&sort=created&direction=desc&per_page=50');
+      const data = await ghApi('/issues?state=all&sort=created&direction=desc&per_page=50');
       this.issues = data.map(parseIssue).filter(Boolean);
     } catch(e){
       toast('加载失败：'+e.message);
