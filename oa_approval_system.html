@@ -26,12 +26,16 @@ input,textarea,select{-webkit-appearance:none;appearance:none}
 <div id="app" class="max-w-lg mx-auto min-h-screen fade"></div>
 
 <script>
+// ============================================================
+// 版本 v3 - 修复无限加载 & 增强稳定性
+// 使用前请确保 Token 具有 repo 完整权限
+// ============================================================
 const $=id=>document.getElementById(id);
 const LS={get:k=>localStorage.getItem(k)||'',set:(k,v)=>localStorage.setItem(k,v)};
 
 const CONFIG={
-  owner:'mirandacute3077',   // 你的GitHub用户名
-  repo:'what-to-buy-today',  // 仓库名
+  owner:'mirandacute3077',
+  repo:'what-to-buy-today',
   get token(){return LS.get('gh_token')},
   set token(v){LS.set('gh_token',v)},
   get password(){return LS.get('oa_password')||'wangruiyue'},
@@ -129,28 +133,40 @@ class SigPad{
 
 const App={
   page:'home',issues:[],current:null,comments:[],loading:false,filter:'all',
+  _initialLoadDone: false,   // 防止重复加载
+
   init(){
-    this.parse();this.render();
+    this.parse();
+    this.render();
     window.addEventListener('hashchange',()=>{this.parse();this.render();});
+    // 如果5秒后仍加载中，强制重置（应急）
+    setTimeout(()=>{
+      if(this.loading){
+        this.loading = false;
+        this.render();
+        toast('加载超时，已自动重置，请点击刷新按钮重试');
+      }
+    }, 8000);
   },
   parse(){const h=location.hash.slice(1);if(!h){this.page='home';this.currentId=null;return}const p=new URLSearchParams(h);this.page=p.get('page')||'home';this.currentId=p.get('id')?parseInt(p.get('id')):null;},
   go(page,id){let url='#page='+page;if(id)url+='&id='+id;location.hash=url;},
 
   async loadList(force=false){
-  if(this.loading && !force) return;
-  this.loading = true;
-  this.render();
-  try{
-    const data = await ghApi('/issues?state=all&labels=collecting,pending,approved,rejected&sort=created&direction=desc&per_page=50');
-    this.issues = data.map(parseIssue).filter(Boolean);
-  } catch(e){
-    toast('加载失败：'+e.message);
-    this.issues = [];
-  }
-  this.loading = false;
-  this._initialLoadDone = true;
-  this.render();
-}
+    if(this.loading && !force) return;
+    this.loading = true;
+    this.render();
+    try{
+      const data = await ghApi('/issues?state=all&labels=collecting,pending,approved,rejected&sort=created&direction=desc&per_page=50');
+      this.issues = data.map(parseIssue).filter(Boolean);
+    } catch(e){
+      toast('加载失败：'+e.message);
+      this.issues = [];
+    }
+    this.loading = false;
+    this._initialLoadDone = true;
+    this.render();
+  },
+
   async loadDetail(force=false){
     if(!this.currentId)return;
     if(this.loading&&!force)return;
@@ -167,9 +183,9 @@ const App={
     if(!CONFIG.token&&this.page!=='settings'){this.page='settings';}
     switch(this.page){
       case'home':
-    this.rHome(a);
-    if(!this.loading && !this._initialLoadDone) this.loadList();
-    break;
+        this.rHome(a);
+        if(!this.loading && !this._initialLoadDone) this.loadList();
+        break;
       case'apply':this.rApply(a);break;
       case'detail':this.rDetail(a);if(!this.current||this.current.number!==this.currentId)this.loadDetail();break;
       case'settings':this.rSettings(a);break;
@@ -178,7 +194,10 @@ const App={
   },
 
   rHome(c){
-    if(this.loading){c.innerHTML='<div class="flex items-center justify-center h-screen flex-col gap-3"><div class="loading"></div><div class="text-sm text-gray-500">加载申请列表...</div></div>';return;}
+    if(this.loading){
+      c.innerHTML='<div class="flex items-center justify-center h-screen flex-col gap-3"><div class="loading"></div><div class="text-sm text-gray-500">加载申请列表...</div></div>';
+      return;
+    }
     const filtered=this.issues.filter(i=>!this.filter||this.filter==='all'||getStatus(i)===this.filter);
     c.innerHTML=`<div class="px-4 pt-6 pb-8">
       <div class="flex items-center justify-between mb-5">
@@ -444,11 +463,13 @@ const App={
     CONFIG.token=$('tk').value.trim();
     CONFIG.password=$('pw2').value.trim();
     toast('保存成功！');
-    App.loadList(true);
-    App.go('home');
+    // 重置加载状态，重新加载首页
+    this._initialLoadDone = false;
+    this.loading = false;
+    this.issues = [];
+    this.go('home');
   },
 
-  // 新增：测试连接功能
   async testConnection(){
     const token=$('tk').value.trim() || CONFIG.token;
     if(!token){toast('请先填写 Token');return;}
@@ -471,11 +492,21 @@ const App={
 
   async initLabels(){
     const labels=[{name:'collecting',color:'3b82f6',description:'评价收集中'},{name:'pending',color:'f59e0b',description:'等待最终审批'},{name:'approved',color:'10b981',description:'已批准'},{name:'rejected',color:'ef4444',description:'已拒绝'}];
-    let ok=0;for(const lb of labels){try{await ghApi('/labels','POST',lb);ok++;}catch(e){if(e.message&&e.message.includes('already_exists'))ok++;}}
+    let ok=0;
+    for(const lb of labels){
+      try{
+        await ghApi('/labels','POST',lb);
+        ok++;
+      }catch(e){
+        if(e.message && e.message.includes('already_exists')) ok++;
+        else toast(`创建标签 ${lb.name} 失败：${e.message}`);
+      }
+    }
     toast(`初始化完成！${ok}/4 个标签就绪`);
   }
 };
 
+// 启动应用
 App.init();
 </script>
 </body>
