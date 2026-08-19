@@ -6,190 +6,360 @@
 <title>OA审批系统</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans SC",sans-serif;-webkit-tap-highlight-color:transparent;}
-.sig{touch-action:none;cursor:crosshair;background-image:radial-gradient(#e5e7eb 1px,transparent 1px);background-size:20px 20px;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans SC",sans-serif;-webkit-tap-highlight-color:transparent;background:#f3f4f6;}
+.sig{touch-action:none;cursor:crosshair;background-image:radial-gradient(#e5e7eb 1px,transparent 1px);background-size:20px 20px;background-color:#fff;}
 .fade{animation:fadeIn .3s ease-out;}@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-.badge{display:inline-flex;align-items:center;padding:4px 12px;border-radius:9999px;font-size:.75rem;font-weight:600}
+.badge{display:inline-flex;align-items:center;padding:4px 12px;border-radius:9999px;font-size:.7rem;font-weight:600}
 .b-collect{background:#dbeafe;color:#1e40af}.b-pending{background:#fef3c7;color:#92400e}
 .b-approve{background:#d1fae5;color:#065f46}.b-reject{background:#fee2e2;color:#991b1b}
-.card{background:#fff;border-radius:16px;box-shadow:0 1px 3px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.03)}
+.card{background:#fff;border-radius:16px;box-shadow:0 1px 3px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.03);}
 .btn-p{background:linear-gradient(135deg,#3b82f6,#2563eb)}.btn-g{background:linear-gradient(135deg,#10b981,#059669)}
 .btn-r{background:linear-gradient(135deg,#ef4444,#dc2626)}
 input,textarea,select{-webkit-appearance:none;appearance:none}
+.loading{display:inline-block;width:20px;height:20px;border:3px solid #e5e7eb;border-top-color:#3b82f6;border-radius:50%;animation:spin 1s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
 </style>
+<base target="_blank">
 </head>
-<body class="bg-gray-50 min-h-screen">
-<div id="app" class="max-w-md mx-auto min-h-screen"></div>
+<body class="min-h-screen">
+<div id="app" class="max-w-lg mx-auto min-h-screen fade"></div>
+
 <script>
 const $=id=>document.getElementById(id);
-function enc(d){return encodeURIComponent(btoa(encodeURIComponent(JSON.stringify(d))))}
-function dec(s){try{return JSON.parse(decodeURIComponent(atob(decodeURIComponent(s))))}catch(e){return null}}
+const LS={get:k=>localStorage.getItem(k)||'',set:(k,v)=>localStorage.setItem(k,v)};
+
+const CONFIG={
+  owner:'mirandacute3077',
+  repo:'what-to-buy-today',
+  get token(){return LS.get('gh_token')},
+  set token(v){LS.set('gh_token',v)},
+  get password(){return LS.get('oa_password')||'wangruiyue'},
+  set password(v){LS.set('oa_password',v)}
+};
+
 function today(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
 function now(){const d=new Date();return today()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
-function copy(t){if(navigator.clipboard){navigator.clipboard.writeText(t).then(()=>alert('链接已复制！'))}else{const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);alert('链接已复制！')}}
+
+async function ghApi(path,method='GET',body=null){
+  const url=`https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}${path}`;
+  const opts={method,headers:{'Authorization':`token ${CONFIG.token}`,'Accept':'application/vnd.github.v3+json','Content-Type':'application/json'}};
+  if(body)opts.body=JSON.stringify(body);
+  const res=await fetch(url,opts);
+  if(!res.ok){const err=await res.json().catch(()=>({}));throw new Error(err.message||`HTTP ${res.status}`);}
+  return res.status===204?null:res.json();
+}
+
+function parseIssue(issue){
+  try{const data=JSON.parse(issue.body);if(data.type==='oa-approval')return{...data,number:issue.number,labels:issue.labels.map(l=>l.name),state:issue.state,created_at:issue.created_at};}catch(e){}
+  return null;
+}
+
+function parseComment(comment){
+  const text=comment.body;
+  const rev=text.match(/<!--OA-REVIEW:(.*?)-->/);
+  const app=text.match(/<!--OA-APPROVAL:(.*?)-->/);
+  const img=text.match(/<img[^>]+src="([^"]+)"/);
+  const sig=img?img[1]:null;
+  if(rev){try{const d=JSON.parse(rev[1]);return{type:'review',...d,signature:sig,created_at:comment.created_at};}catch(e){}}
+  if(app){try{const d=JSON.parse(app[1]);return{type:'approval',...d,signature:sig,created_at:comment.created_at};}catch(e){}}
+  return{type:'other',body:text,created_at:comment.created_at};
+}
+
+function getStatus(issue){if(issue.labels.includes('approved'))return'approved';if(issue.labels.includes('rejected'))return'rejected';if(issue.labels.includes('pending'))return'pending';return'collecting';}
+function statusText(s){return s==='collecting'?'🔍收集中':s==='pending'?'⏳待审批':s==='approved'?'✅已批准':'❌已拒绝';}
+function statusClass(s){return s==='collecting'?'b-collect':s==='pending'?'b-pending':s==='approved'?'b-approve':'b-reject';}
 
 class SigPad{
-    constructor(cid,onDone){
-        this.c=$(cid);this.x=this.c.getContext('2d');this.d=false;this.h=false;this.onDone=onDone;
-        const r=this.c.parentElement.getBoundingClientRect();
-        this.c.width=r.width*2;this.c.height=400;this.c.style.width=r.width+'px';this.c.style.height='200px';
-        this.x.scale(2,2);this.x.lineCap='round';this.x.lineJoin='round';this.x.lineWidth=2.5;this.x.strokeStyle='#1f2937';
-        this.c.addEventListener('mousedown',e=>this.start(e));
-        this.c.addEventListener('mousemove',e=>this.move(e));
-        this.c.addEventListener('mouseup',e=>this.end(e));
-        this.c.addEventListener('mouseleave',e=>this.end(e));
-        this.c.addEventListener('touchstart',e=>this.start(e),{passive:false});
-        this.c.addEventListener('touchmove',e=>this.move(e),{passive:false});
-        this.c.addEventListener('touchend',e=>this.end(e));
-    }
-    pos(e){const r=this.c.getBoundingClientRect(),c=e.touches?e.touches[0]:e;return{x:c.clientX-r.left,y:c.clientY-r.top}}
-    start(e){e.preventDefault();this.d=true;this.h=true;const p=this.pos(e);this.x.beginPath();this.x.moveTo(p.x,p.y)}
-    move(e){e.preventDefault();if(!this.d)return;const p=this.pos(e);this.x.lineTo(p.x,p.y);this.x.stroke()}
-    end(e){e.preventDefault();this.d=false}
-    clear(){this.x.clearRect(0,0,this.c.width,this.c.height);this.h=false}
-    save(){return this.c.toDataURL('image/png')}
+  constructor(cid,onDone){
+    this.c=$(cid);this.x=this.c.getContext('2d');this.d=false;this.h=false;this.onDone=onDone;
+    const r=this.c.parentElement.getBoundingClientRect();
+    this.c.width=r.width*2;this.c.height=400;this.c.style.width=r.width+'px';this.c.style.height='200px';
+    this.x.scale(2,2);this.x.lineCap='round';this.x.lineJoin='round';this.x.lineWidth=2.5;this.x.strokeStyle='#1f2937';
+    this.c.addEventListener('mousedown',e=>this.start(e));
+    this.c.addEventListener('mousemove',e=>this.move(e));
+    this.c.addEventListener('mouseup',e=>this.end(e));
+    this.c.addEventListener('mouseleave',e=>this.end(e));
+    this.c.addEventListener('touchstart',e=>this.start(e),{passive:false});
+    this.c.addEventListener('touchmove',e=>this.move(e),{passive:false});
+    this.c.addEventListener('touchend',e=>this.end(e));
+  }
+  pos(e){const r=this.c.getBoundingClientRect(),c=e.touches?e.touches[0]:e;return{x:c.clientX-r.left,y:c.clientY-r.top}}
+  start(e){e.preventDefault();this.d=true;this.h=true;const p=this.pos(e);this.x.beginPath();this.x.moveTo(p.x,p.y)}
+  move(e){e.preventDefault();if(!this.d)return;const p=this.pos(e);this.x.lineTo(p.x,p.y);this.x.stroke()}
+  end(e){e.preventDefault();this.d=false}
+  clear(){this.x.clearRect(0,0,this.c.width,this.c.height);this.h=false}
+  save(){return this.c.toDataURL('image/png')}
 }
 
 const App={
-    page:'home',data:null,
-    init(){this.parse();this.render();window.addEventListener('hashchange',()=>{this.parse();this.render()})},
-    parse(){const h=location.hash.slice(1);if(!h){this.page='home';this.data=null;return}const p=new URLSearchParams(h);this.page=p.get('page')||'home';const d=p.get('data');this.data=d?dec(d):null},
-    go(page,data){let url='#page='+page;if(data)url+='&data='+enc(data);location.hash=url},
-    url(page,data){let u=location.origin+location.pathname+'#page='+page;if(data)u+='&data='+enc(data);return u},
+  page:'home',issues:[],current:null,comments:[],loading:false,
+  init(){
+    this.parse();this.render();
+    window.addEventListener('hashchange',()=>{this.parse();this.render()});
+  },
+  parse(){const h=location.hash.slice(1);if(!h){this.page='home';return}const p=new URLSearchParams(h);this.page=p.get('page')||'home';this.currentId=p.get('id')?parseInt(p.get('id')):null;},
+  go(page,id){let url='#page='+page;if(id)url+='&id='+id;location.hash=url;},
 
-    render(){const a=$('app');a.innerHTML='';a.className='max-w-md mx-auto min-h-screen fade';switch(this.page){
-        case'home':this.rHome(a);break;case'apply':this.rApply(a);break;case'share':this.rShare(a);break;
-        case'review':this.rReview(a);break;case'approve':this.rApprove(a);break;case'detail':this.rDetail(a);break;
-        default:this.rHome(a);
-    }},
+  async loadList(){
+    this.loading=true;this.render();
+    try{
+      const data=await ghApi('/issues?state=all&labels=collecting,pending,approved,rejected&sort=created&direction=desc&per_page=50');
+      this.issues=data.map(parseIssue).filter(Boolean);
+    }catch(e){alert('加载失败：'+e.message);}
+    this.loading=false;this.render();
+  },
 
-    rHome(c){c.innerHTML=`<div class="px-5 pt-12 pb-8"><div class="text-center mb-10">
-<div class="w-20 h-20 mx-auto mb-4 rounded-2xl btn-p flex items-center justify-center shadow-lg shadow-blue-200">
-<svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></div>
-<h1 class="text-2xl font-bold text-gray-900 mb-2">OA 审批系统</h1><p class="text-gray-500 text-sm">想买啥？先审批，再下单</p></div>
-<div class="space-y-4"><button onclick="App.go('apply')" class="w-full py-4 px-6 btn-p text-white rounded-2xl font-semibold text-lg shadow-lg shadow-blue-200 flex items-center justify-center gap-3 active:scale-95 transition-transform">
-<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>发起新申请</button>
-<div class="card p-5 mt-6"><h3 class="font-bold text-gray-800 mb-3">使用说明</h3>
-<ol class="text-sm text-gray-600 space-y-2 list-decimal list-inside"><li>点击<strong>发起新申请</strong>，填写想买的东西</li><li>提交后把链接发到微信群</li><li>朋友打开链接可以填写评价意见</li><li>至少1人评价后，可发送给<strong>王睿玥</strong>最终审批</li></ol></div>
-<div class="card p-5"><h3 class="font-bold text-gray-800 mb-3">审批流程</h3><div class="flex items-center justify-between text-xs">
-<div class="flex flex-col items-center gap-1"><div class="w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-bold">1</div><span class="text-gray-600">申请</span></div>
-<div class="flex-1 h-0.5 bg-gray-200 mx-2"></div><div class="flex flex-col items-center gap-1"><div class="w-8 h-8 rounded-full bg-gray-200 text-gray-500 flex items-center justify-center font-bold">2</div><span class="text-gray-600">评价</span></div>
-<div class="flex-1 h-0.5 bg-gray-200 mx-2"></div><div class="flex flex-col items-center gap-1"><div class="w-8 h-8 rounded-full bg-gray-200 text-gray-500 flex items-center justify-center font-bold">3</div><span class="text-gray-600">审批</span></div></div></div></div></div>`},
+  async loadDetail(){
+    if(!this.currentId)return;
+    this.loading=true;this.render();
+    try{
+      const [issue,comments]=await Promise.all([ghApi(`/issues/${this.currentId}`),ghApi(`/issues/${this.currentId}/comments`)]);
+      this.current=parseIssue(issue);this.comments=comments.map(parseComment);
+    }catch(e){alert('加载详情失败：'+e.message);}
+    this.loading=false;this.render();
+  },
 
-    rApply(c){c.innerHTML=`<div class="px-5 pt-6 pb-8"><div class="flex items-center gap-3 mb-6">
-<button onclick="App.go('home')" class="p-2 rounded-full hover:bg-gray-200 transition"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button>
-<h2 class="text-xl font-bold text-gray-900">发起申请</h2></div>
-<form id="af" class="card p-5 space-y-4"><div><label class="block text-sm font-medium text-gray-700 mb-1.5">申请人 <span class="text-red-500">*</span></label>
-<input type="text" id="applicant" required placeholder="你的名字" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50"></div>
-<div><label class="block text-sm font-medium text-gray-700 mb-1.5">想买啥 <span class="text-red-500">*</span></label>
-<input type="text" id="item" required placeholder="比如：iPhone 17" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50"></div>
-<div><label class="block text-sm font-medium text-gray-700 mb-1.5">理由 <span class="text-red-500">*</span></label>
-<textarea id="reason" required rows="3" placeholder="为啥想买？" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 resize-none"></textarea></div>
-<div class="grid grid-cols-2 gap-4"><div><label class="block text-sm font-medium text-gray-700 mb-1.5">价格（元） <span class="text-red-500">*</span></label>
-<input type="number" id="price" required min="0" step="0.01" placeholder="5999" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50"></div>
-<div><label class="block text-sm font-medium text-gray-700 mb-1.5">申请日期</label>
-<input type="date" id="date" value="${today()}" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 text-gray-700"></div></div>
-<button type="submit" class="w-full py-3.5 btn-p text-white rounded-xl font-semibold shadow-lg shadow-blue-200 active:scale-95 transition-transform mt-2">生成分享链接</button></form></div>`;
-$('af').addEventListener('submit',e=>{e.preventDefault();this.go('share',{id:Date.now().toString(),date:$('date').value,applicant:$('applicant').value.trim(),item:$('item').value.trim(),reason:$('reason').value.trim(),price:parseFloat($('price').value),reviews:[],finalApproval:null,status:'collecting',createdAt:now()})})},
+  render(){
+    const a=$('app');a.innerHTML='';a.className='max-w-lg mx-auto min-h-screen fade';
+    if(!CONFIG.token&&this.page!=='settings'){this.page='settings';}
+    switch(this.page){
+      case'home':this.rHome(a);break;case'apply':this.rApply(a);break;
+      case'detail':this.rDetail(a);break;case'settings':this.rSettings(a);break;
+      default:this.rHome(a);
+    }
+  },
 
-    rShare(c){if(!this.data){this.go('home');return}const d=this.data,u=this.url('review',d),n=d.reviews?d.reviews.length:0,ok=n>=1;
-c.innerHTML=`<div class="px-5 pt-6 pb-8"><div class="flex items-center gap-3 mb-6">
-<button onclick="App.go('home')" class="p-2 rounded-full hover:bg-gray-200 transition"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button>
-<h2 class="text-xl font-bold text-gray-900">分享申请</h2></div>
-<div class="card p-5 mb-5"><div class="flex items-center justify-between mb-3">
-<span class="badge ${d.status=='collecting'?'b-collect':d.status=='pending'?'b-pending':d.status=='approved'?'b-approve':'b-reject'}">${d.status=='collecting'?'🔍 收集中':d.status=='pending'?'⏳ 待审批':d.status=='approved'?'✅ 已批准':'❌ 已拒绝'}</span>
-<span class="text-xs text-gray-400">${d.date}</span></div>
-<h3 class="text-lg font-bold text-gray-900 mb-1">${d.item}</h3><p class="text-gray-600 text-sm mb-3">${d.reason}</p>
-<div class="flex items-center justify-between text-sm"><span class="text-gray-500">申请人：${d.applicant}</span><span class="text-red-500 font-bold text-lg">¥${d.price.toFixed(2)}</span></div></div>
-<div class="card p-5 mb-5"><h3 class="font-bold text-gray-800 mb-3">分享评价链接</h3><p class="text-sm text-gray-500 mb-3">把下面链接发到微信群，让朋友来评价</p>
-<div class="bg-gray-100 rounded-xl p-3 mb-3 break-all text-xs text-gray-600 font-mono border border-gray-200">${u}</div>
-<button onclick="copy('${u}')" class="w-full py-3 bg-gray-900 text-white rounded-xl font-medium active:scale-95 transition-transform flex items-center justify-center gap-2">
-<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>复制评价链接</button></div>
-${n>0?`<div class="card p-5 mb-5"><h3 class="font-bold text-gray-800 mb-3">已有评价 (${n}人)</h3><div class="space-y-3">${d.reviews.map(r=>`<div class="bg-gray-50 rounded-xl p-3"><div class="flex items-center justify-between mb-1"><span class="font-medium text-sm text-gray-800">${r.reviewer}</span><span class="text-xs text-gray-400">${r.timestamp}</span></div><p class="text-sm text-gray-600 mb-1">${r.opinion}</p>${r.alternative?`<p class="text-xs text-blue-600">💡 平替：${r.alternative}</p>`:''}</div>`).join('')}</div></div>`:'<div class="card p-5 mb-5 text-center text-gray-400 text-sm">暂无人评价，快去分享链接吧</div>'}
-<div class="card p-5"><h3 class="font-bold text-gray-800 mb-3">发送给最终审批人</h3><p class="text-sm text-gray-500 mb-3">最终审批人：<strong class="text-gray-800">王睿玥</strong></p>
-${!ok?`<div class="bg-yellow-50 border border-yellow-200 rounded-xl p-3 text-sm text-yellow-700 flex items-start gap-2"><svg class="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>至少需要 <strong>1个人</strong> 评价后才能提交审批</div>`:`<button onclick="App.sendApprove()" class="w-full py-3 btn-g text-white rounded-xl font-medium shadow-lg shadow-green-200 active:scale-95 transition-transform flex items-center justify-center gap-2"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>生成审批链接发给王睿玥</button>`}</div></div>`},
+  rHome(c){
+    if(this.loading){c.innerHTML='<div class="flex items-center justify-center h-screen"><div class="loading"></div></div>';return;}
+    c.innerHTML=`<div class="px-4 pt-6 pb-8">
+      <div class="flex items-center justify-between mb-6">
+        <div><h1 class="text-xl font-bold text-gray-900">OA 审批系统</h1><p class="text-xs text-gray-500 mt-1">实时同步 · 公开透明</p></div>
+        <div class="flex gap-2">
+          <button onclick="App.go('settings')" class="p-2 rounded-xl bg-white shadow-sm border border-gray-200 text-gray-600"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg></button>
+          <button onclick="App.go('apply')" class="px-4 py-2 btn-p text-white rounded-xl font-medium shadow-lg shadow-blue-200 text-sm flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>发起申请</button>
+        </div>
+      </div>
 
-    sendApprove(){if(!this.data||!this.data.reviews||this.data.reviews.length<1){alert('至少需要1人评价');return}this.data.status='pending';copy(this.url('approve',this.data));setTimeout(()=>alert('审批链接已复制！请发送给王睿玥'),100)},
+      <div class="flex gap-2 mb-4 overflow-x-auto pb-1">
+        <button onclick="App.filter='all';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium ${App.filter==='all'?'bg-gray-900 text-white':'bg-white text-gray-600 border border-gray-200'}">全部</button>
+        <button onclick="App.filter='collecting';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium ${App.filter==='collecting'?'bg-blue-500 text-white':'bg-white text-gray-600 border border-gray-200'}">收集中</button>
+        <button onclick="App.filter='pending';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium ${App.filter==='pending'?'bg-yellow-500 text-white':'bg-white text-gray-600 border border-gray-200'}">待审批</button>
+        <button onclick="App.filter='approved';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium ${App.filter==='approved'?'bg-green-500 text-white':'bg-white text-gray-600 border border-gray-200'}">已批准</button>
+        <button onclick="App.filter='rejected';App.render();" class="px-3 py-1.5 rounded-full text-xs font-medium ${App.filter==='rejected'?'bg-red-500 text-white':'bg-white text-gray-600 border border-gray-200'}">已拒绝</button>
+      </div>
 
-    rReview(c){if(!this.data){this.go('home');return}const d=this.data;
-c.innerHTML=`<div class="px-5 pt-6 pb-8"><div class="flex items-center gap-3 mb-6">
-<button onclick="App.go('home')" class="p-2 rounded-full hover:bg-gray-200 transition"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button>
-<h2 class="text-xl font-bold text-gray-900">填写评价</h2></div>
-<div class="card p-5 mb-5"><div class="flex items-center justify-between mb-3">
-<span class="badge ${d.status=='collecting'?'b-collect':'b-pending'}">${d.status=='collecting'?'🔍 评价收集中':'⏳ 等待最终审批'}</span><span class="text-xs text-gray-400">${d.date}</span></div>
-<h3 class="text-lg font-bold text-gray-900 mb-1">${d.item}</h3><p class="text-gray-600 text-sm mb-2">${d.reason}</p>
-<div class="flex items-center justify-between text-sm border-t border-gray-100 pt-2 mt-2"><span class="text-gray-500">申请人：${d.applicant}</span><span class="text-red-500 font-bold">¥${d.price.toFixed(2)}</span></div></div>
-${d.reviews&&d.reviews.length>0?`<div class="card p-5 mb-5"><h3 class="font-bold text-gray-800 mb-3">已有评价</h3><div class="space-y-3">${d.reviews.map(r=>`<div class="bg-gray-50 rounded-xl p-3"><div class="flex items-center justify-between mb-1"><span class="font-medium text-sm text-gray-800">${r.reviewer}</span><span class="text-xs text-gray-400">${r.timestamp}</span></div><p class="text-sm text-gray-600 mb-1">${r.opinion}</p>${r.alternative?`<p class="text-xs text-blue-600">💡 平替：${r.alternative}</p>`:''}${r.signature?`<img src="${r.signature}" class="mt-2 h-12 object-contain bg-white rounded border border-gray-200">`:''}</div>`).join('')}</div></div>`:''}
-${d.status!='approved'&&d.status!='rejected'?`<form id="rf" class="card p-5 space-y-4"><h3 class="font-bold text-gray-800">你的评价</h3>
-<div><label class="block text-sm font-medium text-gray-700 mb-1.5">评价人姓名 <span class="text-red-500">*</span></label>
-<input type="text" id="rname" required placeholder="你的名字" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50"></div>
-<div><label class="block text-sm font-medium text-gray-700 mb-1.5">审批意见 <span class="text-red-500">*</span></label>
-<textarea id="rop" required rows="3" placeholder="你觉得该买吗？说说理由" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 resize-none"></textarea></div>
-<div><label class="block text-sm font-medium text-gray-700 mb-1.5">是否有平替（选填）</label>
-<input type="text" id="ralt" placeholder="比如：电煮锅可以替代空气炸锅" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50"></div>
-<div><label class="block text-sm font-medium text-gray-700 mb-1.5">电子签名 <span class="text-red-500">*</span></label>
-<div class="border-2 border-dashed border-gray-300 rounded-xl overflow-hidden bg-white"><canvas id="sc" class="sig w-full" style="height:200px;"></canvas></div>
-<div class="flex gap-2 mt-2"><button type="button" id="cs" class="flex-1 py-2 bg-gray-100 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-200 transition">清空重写</button>
-<button type="button" id="ss" class="flex-1 py-2 bg-gray-800 text-white rounded-lg text-sm font-medium hover:bg-gray-700 transition">确认签名</button></div>
-<input type="hidden" id="sd"><div id="sp" class="hidden mt-2 p-2 bg-green-50 border border-green-200 rounded-lg flex items-center gap-2">
-<svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg><span class="text-sm text-green-700">签名已保存</span></div></div>
-<button type="submit" class="w-full py-3.5 btn-p text-white rounded-xl font-semibold shadow-lg shadow-blue-200 active:scale-95 transition-transform">提交评价</button></form>`:''}</div>`;
-if(d.status!='approved'&&d.status!='rejected'){const p=new SigPad('sc',(url)=>{$('sd').value=url;$('sp').classList.remove('hidden')});
-$('cs').onclick=()=>p.clear();$('ss').onclick=()=>{if(!p.h){alert('请先签名');return}$('sd').value=p.save();$('sp').classList.remove('hidden')};
-$('rf').addEventListener('submit',e=>{e.preventDefault();const rv=$('rname').value.trim(),op=$('rop').value.trim(),alt=$('ralt').value.trim(),sig=$('sd').value;
-if(!sig){alert('请先签名');return}if(rv==d.applicant){alert('自己不能给自己评价哦！');return}
-if(d.reviews&&d.reviews.some(r=>r.reviewer==rv)){if(!confirm('你已经评价过了，确定覆盖之前的评价吗？'))return;d.reviews=d.reviews.filter(r=>r.reviewer!=rv)}
-d.reviews=d.reviews||[];d.reviews.push({reviewer:rv,opinion:op,alternative:alt,signature:sig,timestamp:now()});alert('评价成功！');this.go('share',d)})}},
+      ${this.issues.length===0?'<div class="text-center py-20 text-gray-400"><div class="text-4xl mb-3">📋</div><div class="text-sm">暂无申请记录</div><div class="text-xs mt-1">点击右上角发起第一个申请</div></div>':
+      this.issues.filter(i=>!this.filter||this.filter==='all'||getStatus(i)===this.filter).map(i=>{
+        const s=getStatus(i);const reviews=this.comments?this.comments.filter(c=>c.type==='review').length:0;
+        return `<div onclick="App.go('detail',${i.number})" class="card p-4 mb-3 cursor-pointer active:scale-[0.98] transition-transform">
+          <div class="flex items-start justify-between mb-2">
+            <div class="flex items-center gap-2">
+              <span class="badge ${statusClass(s)}">${statusText(s)}</span>
+              <span class="text-xs text-gray-400">${i.date}</span>
+            </div>
+            <span class="text-red-500 font-bold">¥${i.price.toFixed(2)}</span>
+          </div>
+          <h3 class="font-bold text-gray-900 mb-1">${i.item}</h3>
+          <p class="text-sm text-gray-600 line-clamp-2 mb-2">${i.reason}</p>
+          <div class="flex items-center justify-between text-xs text-gray-500">
+            <span>申请人：${i.applicant}</span>
+            ${s==='collecting'?'<span class="text-blue-500">💬 去评价 →</span>':s==='pending'?'<span class="text-yellow-600">👑 等待审批</span>':'<span class="text-gray-400">已完结</span>'}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  },
 
-    rApprove(c){if(!this.data){this.go('home');return}const d=this.data;
-c.innerHTML=`<div class="px-5 pt-6 pb-8"><div class="flex items-center gap-3 mb-6">
-<button onclick="App.go('home')" class="p-2 rounded-full hover:bg-gray-200 transition"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button>
-<h2 class="text-xl font-bold text-gray-900">最终审批</h2></div>
-<div class="bg-gradient-to-r from-purple-500 to-pink-500 rounded-2xl p-5 text-white mb-5 shadow-lg shadow-purple-200"><div class="text-xs opacity-80 mb-1">审批人专属</div><h3 class="text-lg font-bold">王睿玥</h3><p class="text-sm opacity-90 mt-1">请查看申请信息和评价后做出最终决定</p></div>
-<div class="card p-5 mb-5"><h3 class="font-bold text-gray-800 mb-3">申请详情</h3><div class="space-y-2 text-sm">
-<div class="flex justify-between"><span class="text-gray-500">日期</span><span class="text-gray-800">${d.date}</span></div>
-<div class="flex justify-between"><span class="text-gray-500">申请人</span><span class="text-gray-800">${d.applicant}</span></div>
-<div class="flex justify-between"><span class="text-gray-500">想买啥</span><span class="text-gray-800 font-medium">${d.item}</span></div>
-<div class="flex justify-between"><span class="text-gray-500">价格</span><span class="text-red-500 font-bold">¥${d.price.toFixed(2)}</span></div>
-<div class="pt-2 border-t border-gray-100"><span class="text-gray-500 block mb-1">理由</span><span class="text-gray-800">${d.reason}</span></div></div></div>
-<div class="card p-5 mb-5"><h3 class="font-bold text-gray-800 mb-3">评价汇总 (${d.reviews?d.reviews.length:0}人)</h3>
-${d.reviews&&d.reviews.length>0?`<div class="space-y-4">${d.reviews.map((r,idx)=>`<div class="bg-gray-50 rounded-xl p-4 border border-gray-100"><div class="flex items-center justify-between mb-2"><div class="flex items-center gap-2"><div class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-sm font-bold">${idx+1}</div><span class="font-medium text-gray-800">${r.reviewer}</span></div><span class="text-xs text-gray-400">${r.timestamp}</span></div><p class="text-sm text-gray-700 mb-2 ml-10">${r.opinion}</p>${r.alternative?`<p class="text-xs text-blue-600 ml-10 mb-2">💡 平替建议：${r.alternative}</p>`:''}${r.signature?`<div class="ml-10"><img src="${r.signature}" class="h-14 object-contain bg-white rounded border border-gray-200 p-1"></div>`:''}</div>`).join('')}</div>`:'<div class="text-center text-gray-400 py-4">暂无人评价</div>'}</div>
-${d.status=='approved'||d.status=='rejected'?`<div class="card p-5"><h3 class="font-bold text-gray-800 mb-2">审批结果</h3><div class="flex items-center gap-3 mb-2"><span class="badge ${d.status=='approved'?'b-approve':'b-reject'}">${d.status=='approved'?'✅ 已批准':'❌ 已拒绝'}</span></div><p class="text-sm text-gray-600 mt-2">${d.finalApproval.comment}</p>${d.finalApproval.signature?`<img src="${d.finalApproval.signature}" class="mt-3 h-16 object-contain bg-white rounded border border-gray-200 p-1">`:''}<div class="mt-4 p-3 bg-gray-50 rounded-lg text-center"><p class="text-sm text-gray-500">此申请已审批完毕</p></div></div>`:`<form id="af2" class="card p-5 space-y-4"><h3 class="font-bold text-gray-800">做出决定</h3>
-<div class="grid grid-cols-2 gap-3"><label class="cursor-pointer"><input type="radio" name="dec" value="approved" class="hidden peer" required><div class="py-3 px-4 rounded-xl border-2 border-gray-200 text-center peer-checked:border-green-500 peer-checked:bg-green-50 peer-checked:text-green-700 transition"><div class="text-2xl mb-1">✅</div><div class="font-medium text-sm">批准</div></div></label>
-<label class="cursor-pointer"><input type="radio" name="dec" value="rejected" class="hidden peer"><div class="py-3 px-4 rounded-xl border-2 border-gray-200 text-center peer-checked:border-red-500 peer-checked:bg-red-50 peer-checked:text-red-700 transition"><div class="text-2xl mb-1">❌</div><div class="font-medium text-sm">拒绝</div></div></label></div>
-<div><label class="block text-sm font-medium text-gray-700 mb-1.5">审批意见 <span class="text-red-500">*</span></label><textarea id="ac" required rows="3" placeholder="说说你的决定理由" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 resize-none"></textarea></div>
-<div><label class="block text-sm font-medium text-gray-700 mb-1.5">电子签名 <span class="text-red-500">*</span></label>
-<div class="border-2 border-dashed border-gray-300 rounded-xl overflow-hidden bg-white"><canvas id="sac" class="sig w-full" style="height:200px;"></canvas></div>
-<div class="flex gap-2 mt-2"><button type="button" id="csa" class="flex-1 py-2 bg-gray-100 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-200 transition">清空重写</button>
-<button type="button" id="ssa" class="flex-1 py-2 bg-gray-800 text-white rounded-lg text-sm font-medium hover:bg-gray-700 transition">确认签名</button></div>
-<input type="hidden" id="sad"><div id="sap" class="hidden mt-2 p-2 bg-green-50 border border-green-200 rounded-lg flex items-center gap-2">
-<svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg><span class="text-sm text-green-700">签名已保存</span></div></div>
-<button type="submit" class="w-full py-3.5 bg-gray-900 text-white rounded-xl font-semibold shadow-lg active:scale-95 transition-transform">提交审批结果</button></form>`}</div>`;
-if(!(d.status=='approved'||d.status=='rejected')){const p=new SigPad('sac',(url)=>{$('sad').value=url;$('sap').classList.remove('hidden')});
-$('csa').onclick=()=>p.clear();$('ssa').onclick=()=>{if(!p.h){alert('请先签名');return}$('sad').value=p.save();$('sap').classList.remove('hidden')};
-$('af2').addEventListener('submit',e=>{e.preventDefault();const dec=document.querySelector('input[name="dec"]:checked'),cm=$('ac').value.trim(),sig=$('sad').value;
-if(!dec){alert('请选择批准或拒绝');return}if(!sig){alert('请先签名');return}
-d.status=dec.value;d.finalApproval={approver:'王睿玥',status:dec.value,comment:cm,signature:sig,timestamp:now()};
-alert(`已${dec.value=='approved'?'批准':'拒绝'}该申请！`);this.go('detail',d)})}},
+  rApply(c){
+    c.innerHTML=`<div class="px-4 pt-6 pb-8">
+      <div class="flex items-center gap-3 mb-6">
+        <button onclick="App.go('home')" class="p-2 rounded-full hover:bg-gray-200 transition bg-white shadow-sm"><svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button>
+        <h2 class="text-lg font-bold text-gray-900">发起申请</h2>
+      </div>
+      <form id="af" class="card p-5 space-y-4">
+        <div><label class="block text-sm font-medium text-gray-700 mb-1.5">申请人 <span class="text-red-500">*</span></label>
+        <input type="text" id="applicant" required placeholder="你的名字" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50"></div>
+        <div><label class="block text-sm font-medium text-gray-700 mb-1.5">想买啥 <span class="text-red-500">*</span></label>
+        <input type="text" id="item" required placeholder="比如：iPhone 17" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50"></div>
+        <div><label class="block text-sm font-medium text-gray-700 mb-1.5">理由 <span class="text-red-500">*</span></label>
+        <textarea id="reason" required rows="3" placeholder="为啥想买？" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 resize-none"></textarea></div>
+        <div class="grid grid-cols-2 gap-4">
+          <div><label class="block text-sm font-medium text-gray-700 mb-1.5">价格（元） <span class="text-red-500">*</span></label>
+          <input type="number" id="price" required min="0" step="0.01" placeholder="5999" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50"></div>
+          <div><label class="block text-sm font-medium text-gray-700 mb-1.5">申请日期</label>
+          <input type="date" id="date" value="${today()}" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 text-gray-700"></div>
+        </div>
+        <button type="submit" class="w-full py-3.5 btn-p text-white rounded-xl font-semibold shadow-lg shadow-blue-200 active:scale-95 transition-transform mt-2">提交申请</button>
+      </form>
+    </div>`;
+    $('af').addEventListener('submit',async e=>{
+      e.preventDefault();
+      const btn=e.target.querySelector('button[type="submit"]');btn.disabled=true;btn.innerHTML='<div class="loading"></div>';
+      try{
+        await ghApi('/issues','POST',{
+          title:`[申请] ${$('applicant').value.trim()}想买${$('item').value.trim()} - ¥${$('price').value}`,
+          body:JSON.stringify({type:'oa-approval',date:$('date').value,applicant:$('applicant').value.trim(),item:$('item').value.trim(),reason:$('reason').value.trim(),price:parseFloat($('price').value),createdAt:now()}),
+          labels:['collecting']
+        });
+        alert('申请提交成功！');App.go('home');
+      }catch(err){alert('提交失败：'+err.message);btn.disabled=false;btn.innerText='提交申请';}
+    });
+  },
 
-    rDetail(c){if(!this.data){this.go('home');return}const d=this.data;
-c.innerHTML=`<div class="px-5 pt-6 pb-8"><div class="flex items-center gap-3 mb-6">
-<button onclick="App.go('home')" class="p-2 rounded-full hover:bg-gray-200 transition"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button>
-<h2 class="text-xl font-bold text-gray-900">审批详情</h2></div>
-<div class="card p-5 mb-5"><div class="flex items-center justify-between mb-3">
-<span class="badge ${d.status=='collecting'?'b-collect':d.status=='pending'?'b-pending':d.status=='approved'?'b-approve':'b-reject'}">${d.status=='collecting'?'🔍 收集中':d.status=='pending'?'⏳ 待审批':d.status=='approved'?'✅ 已批准':'❌ 已拒绝'}</span>
-<span class="text-xs text-gray-400">${d.date}</span></div>
-<h3 class="text-xl font-bold text-gray-900 mb-2">${d.item}</h3><p class="text-gray-600 mb-4">${d.reason}</p>
-<div class="grid grid-cols-2 gap-4 text-sm"><div class="bg-gray-50 rounded-lg p-3"><div class="text-gray-500 mb-1">申请人</div><div class="font-medium text-gray-800">${d.applicant}</div></div>
-<div class="bg-gray-50 rounded-lg p-3"><div class="text-gray-500 mb-1">价格</div><div class="font-bold text-red-500 text-lg">¥${d.price.toFixed(2)}</div></div></div></div>
-${d.reviews&&d.reviews.length>0?`<div class="card p-5 mb-5"><h3 class="font-bold text-gray-800 mb-3">评价记录</h3><div class="space-y-4">${d.reviews.map(r=>`<div class="border border-gray-100 rounded-xl p-4"><div class="flex items-center justify-between mb-2"><span class="font-medium text-gray-800">${r.reviewer}</span><span class="text-xs text-gray-400">${r.timestamp}</span></div><p class="text-sm text-gray-700 mb-2">${r.opinion}</p>${r.alternative?`<p class="text-xs text-blue-600 mb-2">💡 平替：${r.alternative}</p>`:''}${r.signature?`<img src="${r.signature}" class="h-14 object-contain bg-white rounded border border-gray-200 p-1">`:''}</div>`).join('')}</div></div>`:''}
-${d.finalApproval?`<div class="card p-5 mb-5"><h3 class="font-bold text-gray-800 mb-3">最终审批</h3><div class="flex items-center gap-3 mb-3"><div class="w-10 h-10 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center font-bold">王</div><div><div class="font-medium text-gray-800">王睿玥</div><div class="text-xs text-gray-500">${d.finalApproval.timestamp}</div></div><span class="ml-auto badge ${d.status=='approved'?'b-approve':'b-reject'}">${d.status=='approved'?'✅ 批准':'❌ 拒绝'}</span></div>
-<p class="text-sm text-gray-700 mb-3 bg-gray-50 rounded-lg p-3">${d.finalApproval.comment}</p>${d.finalApproval.signature?`<img src="${d.finalApproval.signature}" class="h-20 object-contain bg-white rounded border border-gray-200 p-1">`:''}</div>`:''}
-<div class="flex gap-3"><button onclick="copy(location.href)" class="flex-1 py-3 bg-gray-900 text-white rounded-xl font-medium active:scale-95 transition-transform">复制本页链接</button>
-<button onclick="App.go('home')" class="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-medium active:scale-95 transition-transform">返回首页</button></div></div>`}
+  rDetail(c){
+    if(this.loading){c.innerHTML='<div class="flex items-center justify-center h-screen"><div class="loading"></div></div>';return;}
+    if(!this.current){c.innerHTML='<div class="text-center py-20 text-gray-400">加载中...</div>';this.loadDetail();return;}
+    const d=this.current,s=getStatus(d);
+    const reviews=this.comments.filter(x=>x.type==='review');
+    const approval=this.comments.find(x=>x.type==='approval');
+    const canSubmitToApprove=reviews.length>=1&&s==='collecting';
+
+    c.innerHTML=`<div class="px-4 pt-6 pb-8">
+      <div class="flex items-center gap-3 mb-6">
+        <button onclick="App.go('home')" class="p-2 rounded-full hover:bg-gray-200 transition bg-white shadow-sm"><svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button>
+        <h2 class="text-lg font-bold text-gray-900">申请详情</h2>
+        <button onclick="App.loadDetail()" class="ml-auto p-2 rounded-full hover:bg-gray-200 transition bg-white shadow-sm text-gray-600 text-xs">🔄 刷新</button>
+      </div>
+
+      <div class="card p-5 mb-4">
+        <div class="flex items-center justify-between mb-3">
+          <span class="badge ${statusClass(s)}">${statusText(s)}</span>
+          <span class="text-xs text-gray-400">${d.date}</span>
+        </div>
+        <h3 class="text-xl font-bold text-gray-900 mb-2">${d.item}</h3>
+        <p class="text-gray-600 text-sm mb-4">${d.reason}</p>
+        <div class="grid grid-cols-2 gap-3 text-sm">
+          <div class="bg-gray-50 rounded-lg p-3"><div class="text-gray-500 text-xs mb-1">申请人</div><div class="font-medium text-gray-800">${d.applicant}</div></div>
+          <div class="bg-gray-50 rounded-lg p-3"><div class="text-gray-500 text-xs mb-1">价格</div><div class="font-bold text-red-500 text-lg">¥${d.price.toFixed(2)}</div></div>
+        </div>
+        ${canSubmitToApprove?`<button onclick="App.submitToApprove(${d.number})" class="w-full mt-4 py-3 btn-g text-white rounded-xl font-medium shadow-lg shadow-green-200 active:scale-95 transition-transform">✅ 已有${reviews.length}人评价，提交给王睿玥审批</button>`:''}
+      </div>
+
+      ${reviews.length>0?`<div class="card p-5 mb-4"><h3 class="font-bold text-gray-800 mb-3">评价记录 (${reviews.length}人)</h3><div class="space-y-3">${reviews.map(r=>`
+        <div class="bg-gray-50 rounded-xl p-3 border border-gray-100">
+          <div class="flex items-center justify-between mb-1"><span class="font-medium text-sm text-gray-800">${r.reviewer}</span><span class="text-xs text-gray-400">${r.created_at?r.created_at.slice(0,10):''}</span></div>
+          <p class="text-sm text-gray-700 mb-1">${r.opinion}</p>
+          ${r.alternative?`<p class="text-xs text-blue-600 mb-1">💡 平替：${r.alternative}</p>`:''}
+          ${r.signature?`<img src="${r.signature}" class="h-12 object-contain bg-white rounded border border-gray-200 p-1">`:''}
+        </div>
+      `).join('')}</div></div>`:''}
+
+      ${approval?`<div class="card p-5 mb-4"><h3 class="font-bold text-gray-800 mb-3">最终审批</h3>
+        <div class="flex items-center gap-3 mb-3"><div class="w-10 h-10 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center font-bold">王</div>
+        <div><div class="font-medium text-gray-800">王睿玥</div><div class="text-xs text-gray-500">${approval.created_at?approval.created_at.slice(0,10):''}</div></div>
+        <span class="ml-auto badge ${approval.status==='approved'?'b-approve':'b-reject'}">${approval.status==='approved'?'✅ 批准':'❌ 拒绝'}</span></div>
+        <p class="text-sm text-gray-700 bg-gray-50 rounded-lg p-3 mb-2">${approval.comment}</p>
+        ${approval.signature?`<img src="${approval.signature}" class="h-16 object-contain bg-white rounded border border-gray-200 p-1">`:''}
+      </div>`:''}
+
+      ${s!=='approved'&&s!=='rejected'?`<div class="card p-5 mb-4">
+        <h3 class="font-bold text-gray-800 mb-3">${s==='collecting'?'添加评价':'评价已结束'}</h3>
+        ${s==='collecting'?`<form id="rf" class="space-y-3">
+          <input type="text" id="rname" required placeholder="你的名字" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 text-sm">
+          <textarea id="rop" required rows="2" placeholder="你觉得该买吗？" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 resize-none text-sm"></textarea>
+          <input type="text" id="ralt" placeholder="是否有平替（选填）" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 text-sm">
+          <div><label class="block text-xs font-medium text-gray-700 mb-1">电子签名 <span class="text-red-500">*</span></label>
+          <div class="border-2 border-dashed border-gray-300 rounded-xl overflow-hidden bg-white"><canvas id="sc" class="sig w-full" style="height:160px;"></canvas></div>
+          <div class="flex gap-2 mt-2"><button type="button" id="cs" class="flex-1 py-2 bg-gray-100 text-gray-600 rounded-lg text-xs font-medium">清空</button><button type="button" id="ss" class="flex-1 py-2 bg-gray-800 text-white rounded-lg text-xs font-medium">确认签名</button></div>
+          <input type="hidden" id="sd"><div id="sp" class="hidden mt-2 p-2 bg-green-50 border border-green-200 rounded-lg text-xs text-green-700">✅ 签名已保存</div></div>
+          <button type="submit" class="w-full py-3 btn-p text-white rounded-xl font-medium shadow-lg active:scale-95 transition-transform text-sm">提交评价</button>
+        </form>`:'<div class="text-center text-gray-400 text-sm py-4">评价已结束，等待最终审批</div>'}
+      </div>`:''}
+
+      ${s==='pending'&&!approval?`<div class="card p-5 mb-4"><h3 class="font-bold text-gray-800 mb-3">👑 审批入口</h3>
+        <div id="pwBox" class="space-y-3">
+          <input type="password" id="pw" placeholder="输入审批密码" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-purple-500 focus:ring-2 focus:ring-purple-200 outline-none bg-gray-50 text-sm">
+          <button onclick="App.checkPassword()" class="w-full py-3 bg-purple-600 text-white rounded-xl font-medium active:scale-95 transition-transform text-sm">验证身份</button>
+        </div>
+        <form id="af2" class="hidden space-y-3">
+          <div class="grid grid-cols-2 gap-3">
+            <label class="cursor-pointer"><input type="radio" name="dec" value="approved" class="hidden peer" required><div class="py-3 px-4 rounded-xl border-2 border-gray-200 text-center peer-checked:border-green-500 peer-checked:bg-green-50 peer-checked:text-green-700 transition"><div class="text-xl mb-1">✅</div><div class="font-medium text-xs">批准</div></div></label>
+            <label class="cursor-pointer"><input type="radio" name="dec" value="rejected" class="hidden peer"><div class="py-3 px-4 rounded-xl border-2 border-gray-200 text-center peer-checked:border-red-500 peer-checked:bg-red-50 peer-checked:text-red-700 transition"><div class="text-xl mb-1">❌</div><div class="font-medium text-xs">拒绝</div></div></label>
+          </div>
+          <textarea id="ac" required rows="2" placeholder="审批意见" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-purple-500 focus:ring-2 focus:ring-purple-200 outline-none bg-gray-50 resize-none text-sm"></textarea>
+          <div><label class="block text-xs font-medium text-gray-700 mb-1">电子签名 <span class="text-red-500">*</span></label>
+          <div class="border-2 border-dashed border-gray-300 rounded-xl overflow-hidden bg-white"><canvas id="sac" class="sig w-full" style="height:160px;"></canvas></div>
+          <div class="flex gap-2 mt-2"><button type="button" id="csa" class="flex-1 py-2 bg-gray-100 text-gray-600 rounded-lg text-xs font-medium">清空</button><button type="button" id="ssa" class="flex-1 py-2 bg-gray-800 text-white rounded-lg text-xs font-medium">确认签名</button></div>
+          <input type="hidden" id="sad"><div id="sap" class="hidden mt-2 p-2 bg-green-50 border border-green-200 rounded-lg text-xs text-green-700">✅ 签名已保存</div></div>
+          <button type="submit" class="w-full py-3 bg-gray-900 text-white rounded-xl font-medium shadow-lg active:scale-95 transition-transform text-sm">提交审批结果</button>
+        </form>
+      </div>`:''}
+    </div>`;
+
+    if(s==='collecting'){
+      const p=new SigPad('sc');$('cs').onclick=()=>p.clear();$('ss').onclick=()=>{if(!p.h){alert('请先签名');return}$('sd').value=p.save();$('sp').classList.remove('hidden');};
+      $('rf').addEventListener('submit',async e=>{
+        e.preventDefault();const rv=$('rname').value.trim(),op=$('rop').value.trim(),alt=$('ralt').value.trim(),sig=$('sd').value;
+        if(!sig){alert('请先签名');return}if(rv===d.applicant){alert('自己不能给自己评价！');return}
+        if(reviews.some(r=>r.reviewer===rv)){if(!confirm('你已评价过，确定覆盖？'))return;}
+        try{
+          await ghApi(`/issues/${d.number}/comments`,'POST',{body:`<!--OA-REVIEW:${JSON.stringify({reviewer:rv,opinion:op,alternative:alt})}-->\n\n**评价人**：${rv}\n**意见**：${op}\n${alt?'**平替**：'+alt+'\n':''}\n<img src="${sig}" width="180">`});
+          alert('评价成功！');App.loadDetail();
+        }catch(err){alert('失败：'+err.message);}
+      });
+    }
+
+    if(s==='pending'&&!approval){
+      const pa=new SigPad('sac');$('csa').onclick=()=>pa.clear();$('ssa').onclick=()=>{if(!pa.h){alert('请先签名');return}$('sad').value=pa.save();$('sap').classList.remove('hidden');};
+      $('af2').addEventListener('submit',async e=>{
+        e.preventDefault();const dec=document.querySelector('input[name="dec"]:checked'),cm=$('ac').value.trim(),sig=$('sad').value;
+        if(!dec){alert('请选择批准或拒绝');return}if(!sig){alert('请先签名');return}
+        try{
+          await ghApi(`/issues/${d.number}/comments`,'POST',{body:`<!--OA-APPROVAL:${JSON.stringify({approver:'王睿玥',status:dec.value,comment:cm})}-->\n\n**审批人**：王睿玥\n**结果**：${dec.value==='approved'?'✅ 批准':'❌ 拒绝'}\n**意见**：${cm}\n\n<img src="${sig}" width="180">`});
+          await ghApi(`/issues/${d.number}/labels`,'PUT',{labels:[dec.value]});
+          await ghApi(`/issues/${d.number}`,'PATCH',{state:'closed'});
+          alert(`已${dec.value==='approved'?'批准':'拒绝'}！`);App.loadDetail();
+        }catch(err){alert('审批失败：'+err.message);}
+      });
+    }
+  },
+
+  checkPassword(){
+    if($('pw').value===CONFIG.password){$('pwBox').classList.add('hidden');$('af2').classList.remove('hidden');}
+    else{alert('密码错误');}
+  },
+
+  async submitToApprove(number){
+    if(!confirm('确定提交给王睿玥审批吗？提交后不能再评价。'))return;
+    try{await ghApi(`/issues/${number}/labels`,'PUT',{labels:['pending']});alert('已提交审批！');App.loadDetail();}
+    catch(err){alert('失败：'+err.message);}
+  },
+
+  rSettings(c){
+    c.innerHTML=`<div class="px-4 pt-6 pb-8">
+      <div class="flex items-center gap-3 mb-6">
+        <button onclick="App.go('home')" class="p-2 rounded-full hover:bg-gray-200 transition bg-white shadow-sm"><svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button>
+        <h2 class="text-lg font-bold text-gray-900">系统设置</h2>
+      </div>
+      <div class="card p-5 space-y-4">
+        <div><label class="block text-sm font-medium text-gray-700 mb-1.5">GitHub Token <span class="text-red-500">*</span></label>
+        <input type="password" id="tk" value="${CONFIG.token}" placeholder="ghp_xxxxxxxx" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 text-sm">
+        <p class="text-xs text-gray-500 mt-1">用于读写 GitHub Issues，不会上传到任何服务器</p></div>
+        <div><label class="block text-sm font-medium text-gray-700 mb-1.5">审批密码</label>
+        <input type="text" id="pw2" value="${CONFIG.password}" placeholder="王睿玥的审批密码" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none bg-gray-50 text-sm"></div>
+        <button onclick="App.saveSettings()" class="w-full py-3 btn-p text-white rounded-xl font-medium shadow-lg active:scale-95 transition-transform text-sm">保存设置</button>
+        <button onclick="App.initLabels()" class="w-full py-3 bg-gray-100 text-gray-700 rounded-xl font-medium active:scale-95 transition-transform text-sm">🏷️ 初始化标签（首次使用必点）</button>
+        <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-800 space-y-1">
+          <div class="font-bold mb-1">如何获取 GitHub Token？</div>
+          <div>1. 点击 GitHub 头像 → Settings</div>
+          <div>2. 最下方 Developer settings → Personal access tokens → Tokens (classic)</div>
+          <div>3. Generate new token → 勾选 public_repo → 生成后复制</div>
+        </div>
+      </div>
+    </div>`;
+  },
+
+  saveSettings(){CONFIG.token=$('tk').value.trim();CONFIG.password=$('pw2').value.trim();alert('保存成功！');App.go('home');},
+
+  async initLabels(){
+    const labels=[{name:'collecting',color:'3b82f6',description:'评价收集中'},{name:'pending',color:'f59e0b',description:'等待最终审批'},{name:'approved',color:'10b981',description:'已批准'},{name:'rejected',color:'ef4444',description:'已拒绝'}];
+    let ok=0;for(const lb of labels){try{await ghApi('/labels','POST',lb);ok++;}catch(e){}}
+    alert(`初始化完成！新建 ${ok} 个标签，已存在则跳过。`);
+  }
 };
 
 App.init();
+if(App.page==='home')App.loadList();
 </script>
 </body>
 </html>
